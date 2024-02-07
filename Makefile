@@ -10,3 +10,6 @@ all: buildsdb
 
 buildsdb: ${SRC}
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ ${SRC} `pkg-config --cflags --libs libcurl nlohmann_json` -lSQLiteCpp -pthread
+
+install:
+	install buildsdb $(DESTDIR)$(PREFIX)/bin
