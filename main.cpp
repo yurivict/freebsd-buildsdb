@@ -623,7 +623,6 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, SQLite::Database &d
 	// update the server table
 	for (auto &i : buildInfos) {
 		auto const &server = i.first;
-		MSG("... saving builds from the server " << server)
 
 		SQL_STMT(stmtInsertServer, "INSERT INTO server(url) VALUES(?)")
 		SQL_STMT(stmtSelectServer, "SELECT id FROM server WHERE url=?")
