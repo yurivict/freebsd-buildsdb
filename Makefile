@@ -3,6 +3,7 @@
 
 CXXFLAGS?=	-O2
 CXXFLAGS+=	-std=c++20
+CXXFLAGS+=	-Wall
 
 SRC=		main.cpp schema.cpp
 
