@@ -15,7 +15,6 @@
 #include <tuple>
 #include <vector>
 
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -24,13 +23,12 @@
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
-using json = nlohmann::json;
-
 #include <SQLiteCpp/Database.h>
 #include <SQLiteCpp/Statement.h>
 #include <SQLiteCpp/Transaction.h>
-
 #include <taskflow/taskflow.hpp>
+
+using json = nlohmann::json;
 
 
 //
