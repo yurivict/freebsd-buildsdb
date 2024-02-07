@@ -151,7 +151,7 @@ static std::string fetchDataFromURL(const std::string &url) {
 		// run request
 		CURLcode res = curl_easy_perform(curl);
 		if (res != CURLE_OK)
-			FAIL("failed top fetch from a URL: " << curl_easy_strerror(res))
+			FAIL("failed to fetch from a URL: " << curl_easy_strerror(res))
 
 		// cleanup
 		curl_easy_cleanup(curl);
@@ -159,9 +159,20 @@ static std::string fetchDataFromURL(const std::string &url) {
 		// dump files if requested
 		if (::getenv("BUILDSDB_DUMP_DOWNLOADED_FILES")) {
 			static unsigned fileNo = 1;
-			writeFile(STR("debug." << fileNo << "url.txt"), url);
-			writeFile(STR("debug." << fileNo << ".content.json"), str);
-			fileNo++;
+
+			// generate debug file number
+			unsigned fno;
+			if (::getenv("BUILDSDB_SEQUENTIAL"))
+				fno = fileNo++;
+			else {
+				static std::mutex mutex;
+				std::lock_guard<std::mutex> guard(mutex);
+				fno = fileNo++;
+			}
+
+			// write debug files
+			writeFile(STR("debug." << fno << ".url.txt"), url);
+			writeFile(STR("debug." << fno << ".content.json"), str);
 		}
 
 		return str;
@@ -497,10 +508,13 @@ static void fetchBuildInfo(
 
 						// parse JSON with build summary info
 						auto bis = Parser::parseBuildSummaries(F(json::parse(str), "builds"), mastername);
+
 						{ // save build info objects into buildInfos
 							std::lock_guard<std::mutex> guard(buildInfosMutex);
 							buildInfos[server][mastername] = bis;
 						}
+
+						// process all builds in this masterbuild
 						for (auto &bi : bis)
 							subflow.emplace([bi,server,mastername]() {
 								// fetch data
