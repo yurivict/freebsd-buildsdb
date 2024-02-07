@@ -19,6 +19,7 @@ const char *dbSchema = R"(
 		started         INTEGER NULL,
 		ended           INTEGER NULL,
 		status          TEXT NULL,
+		last_modified   TEXT NOT NULL,
 		FOREIGN KEY (masterbuild_id) REFERENCES masterbuild(id)
 	);
 	--CREATE TABLE IF NOT EXISTS tobuild (
@@ -44,7 +45,7 @@ const char *dbSchema = R"(
 		PRIMARY KEY     (build_id, origin, pkgname),
 		FOREIGN KEY (build_id) REFERENCES build(id)
 	);
-	CREATE INDEX index_built_origin ON built(origin);
+	CREATE INDEX IF NOT EXISTS index_built_origin ON built(origin);
 	CREATE TABLE IF NOT EXISTS failed (
 		build_id        INTEGER NOT NULL,
 		origin          TEXT NOT NULL,
@@ -55,7 +56,7 @@ const char *dbSchema = R"(
 		PRIMARY KEY     (build_id, origin, pkgname),
 		FOREIGN KEY (build_id) REFERENCES build(id)
 	);
-	CREATE INDEX index_failed_origin ON failed(origin);
+	CREATE INDEX IF NOT EXISTS index_failed_origin ON failed(origin);
 	CREATE TABLE IF NOT EXISTS ignored (
 		build_id        INTEGER NOT NULL,
 		origin          TEXT NOT NULL,

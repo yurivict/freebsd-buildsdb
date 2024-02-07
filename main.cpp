@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <assert.h>
@@ -55,7 +56,8 @@ using json = nlohmann::json;
 	static SQLite::Statement var(db, sql); \
 	var.reset();
 
-#define MSG(msg...) PRINT(timestamp() << ": " << msg) // user message
+#define MSG(msg...)     PRINT(timestamp() << ": " << msg) // user message
+#define WARNING(msg...) MSG("warning: " << msg)
 #define DEBUG(msg...) // PRINT("DEBUG: " << msg) // disable this macro for production
 
 //
@@ -135,23 +137,70 @@ static void writeFile(const std::string &fileName, const std::string &content) {
 	myfile.close();
 }
 
-static std::string fetchDataFromURL(const std::string &url) {
-	if (auto curl = curl_easy_init()) {
-		// string
-		std::string str;
-		str.reserve(1024*10);
+static std::tuple<bool/*waived*/,std::string/*content*/> fetchDataFromURL(
+	const std::string &url,
+	const std::string *knownLastModified = nullptr,
+	std::string *needLastModified = nullptr
+) {
+	// helpers
+	auto getOneHeader = [](CURL *curl, const char *header_name) -> std::string {
+		struct curl_header *prev = nullptr;
+		while (auto h = curl_easy_nextheader(curl, CURLH_HEADER, 0, prev)) {
+			if (::strcmp(h->name, header_name) == 0) {
+				return h->value;
+			}
+			prev = h;
+		}
+		WARNING("no Last-Modified field is present in the server response")
+		return "";
+	};
 
-		// set options
+	// run
+	if (auto curl = curl_easy_init()) {
+		// set general options
 		if (::getenv("HTTP_PROXY"))
 			curl_easy_setopt(curl, CURLOPT_PROXY, ::getenv("HTTP_PROXY")); // ex. "socks5://localhost:9050"
 		curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+
+		// is same Last-Modified?
+		if (knownLastModified && !knownLastModified->empty()) {
+			// set options for the HEADER request
+			curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+
+			// perform the HEADER request
+			curl_easy_perform(curl);
+
+			// get the header
+			auto newLastModified = getOneHeader(curl, "Last-Modified");
+
+			// restore options
+			curl_easy_setopt(curl, CURLOPT_NOBODY, 0L);
+
+			// see if it is the same
+			if (!newLastModified.empty() && newLastModified == *knownLastModified) {
+				curl_easy_cleanup(curl);
+				//MSG("FETCH: YES waived request for URL=" << url)
+				return {true/*waived*/, ""};
+			}
+			//MSG("FETCH: NOT waived request for URL=" << url << ": knownLastModified=" << *knownLastModified << " != newLastModified=" << newLastModified)
+		}
+
+		// string buffer
+		std::string str;
+		str.reserve(1024*10);
+
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeData); // fn
-		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &str); // fn
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &str); // for fn
 
 		// run request
 		CURLcode res = curl_easy_perform(curl);
 		if (res != CURLE_OK)
 			FAIL("failed to fetch from a URL: " << curl_easy_strerror(res))
+
+		// get HTTP Last-Modified if requested
+		if (needLastModified) {
+			*needLastModified = getOneHeader(curl, "Last-Modified");
+		}
 
 		// cleanup
 		curl_easy_cleanup(curl);
@@ -175,7 +224,7 @@ static std::string fetchDataFromURL(const std::string &url) {
 			writeFile(STR("debug." << fno << ".content.json"), str);
 		}
 
-		return str;
+		return {false/*not waived*/, str};
 	} else {
 		throw std::runtime_error(STR("failed to initialize CURL for the URL '" << url << "'"));
 	}
@@ -234,6 +283,14 @@ struct BuildInfo {
 		std::string    depends;
 	};
 
+	BuildInfo()
+	: waived(false)
+	{ }
+
+	// varous fields
+	bool            waived; // no need to fetch since the DB already has the same version
+	std::string     last_modified;
+
 	// build summary info
 	std::string     buildname;
 	std::string     jailname;
@@ -271,10 +328,6 @@ struct Parser {
 	static BuildInfoPtr parseBuildSummary(const json &j, const std::string &masterbuild, const std::string &buildname) { // assumes json to be an object
 		auto bi = std::make_shared<BuildInfo>();
 
-		auto stat = [](const json &j, const char *name) {
-			return HAS(j, name) ? S2U(F(j, name)) : 0; // various stats fields can be missing in dofferent records
-		};
-
 		bi->buildname     = F(j, "buildname");
 		bi->jailname      = F(j, "jailname");
 		bi->started       = S2U(F(j, "started"));
@@ -291,7 +344,7 @@ struct Parser {
 			FAIL("JSON isn't an object")
 
 		// progress message
-		MSG("... ... there are " << j.size() << " builds to fetch")
+		MSG("... ... there are " << j.size() << " builds to fetch for masterbuild=" << masterbuild)
 
 		// extract data
 		for (auto i = j.begin(); i != j.end(); i++)
@@ -446,8 +499,28 @@ static std::vector<std::string> fetchServerList() {
 
 static void fetchBuildInfo(
 	const std::vector<std::string> &servers,
-	BuildInfos &buildInfos
+	BuildInfos &buildInfos,
+	SQLite::Database &db // only to retrieve lastModified
 ) {
+	// retrieve the build.last_modified field from DB so that we can skip builds that weren't changed
+	std::map<std::string/*masterbuild*/, std::map<std::string/*buildname*/, std::string/*last_modified*/>> lastModifiedInDB;
+	{
+		SQLite::Statement stmt(db, "SELECT m.name, b.name, b.last_modified FROM masterbuild m, build b WHERE m.id = b.masterbuild_id");
+		while (stmt.executeStep())
+			lastModifiedInDB[stmt.getColumn(0)][stmt.getColumn(1)] = (std::string)stmt.getColumn(2);
+	}
+	auto getLastModifiedInDB = [&lastModifiedInDB](const std::string &mastername, const std::string &buildname) -> const std::string* {
+		auto im = lastModifiedInDB.find(mastername);
+		if (im == lastModifiedInDB.end())
+			return nullptr;
+		auto ib = im->second.find(buildname);
+		if (ib != im->second.end())
+			return &ib->second;
+		else
+			return nullptr;
+	};
+
+	// run
 	if (::getenv("BUILDSDB_SEQUENTIAL")) {
 		MSG("sequential run")
 		// by server
@@ -457,7 +530,7 @@ static void fetchBuildInfo(
 			// info for this server
 			auto &buildInfo = buildInfos[server];
 
-			auto str = fetchDataFromURL(STR(server << "/data/.data.json"));
+			auto [waived, str] = fetchDataFromURL(STR(server << "/data/.data.json"));
 			DEBUG("JSON-STRING(server=" << server << ")=" << str)
 
 			// for each master build on this server
@@ -465,7 +538,7 @@ static void fetchBuildInfo(
 				MSG("... fetching builds for " << mastername << " from the server " << server)
 
 				// fetch data
-				str = fetchDataFromURL(STR(server << "/data/" << mastername << "/.data.json"));
+				auto [waived, str] = fetchDataFromURL(STR(server << "/data/" << mastername << "/.data.json"));
 				DEBUG("JSON-STRING(server=" << server << " mastername=" << mastername << ")=" << str)
 
 				// check
@@ -475,11 +548,16 @@ static void fetchBuildInfo(
 				// parse JSON with build summary info
 				for (auto &bi : buildInfo[mastername] = Parser::parseBuildSummaries(F(json::parse(str), "builds"), mastername)) {
 					// fetch data
-					str = fetchDataFromURL(STR(server << "/data/" << mastername << "/" << bi->buildname << "/.data.json"));
+					auto [waived, str] = fetchDataFromURL(
+						STR(server << "/data/" << mastername << "/" << bi->buildname << "/.data.json"),
+						getLastModifiedInDB(mastername, bi->buildname),
+						&bi->last_modified
+					);
 					DEBUG("JSON-STRING(server=" << server << " mastername=" << mastername << " buildname=" << bi->buildname << ")=" << str)
 
 					// parse JSON with build details
-					Parser::parseBuildDetails(json::parse(str), *bi, mastername);
+					if (!(bi->waived = waived))
+						Parser::parseBuildDetails(json::parse(str), *bi, mastername);
 				}
 			}
 		}
@@ -492,15 +570,15 @@ static void fetchBuildInfo(
 		std::mutex buildInfosMutex;
 
 		for (auto &server : servers)
-			taskflow.emplace([server,&buildInfos,&buildInfosMutex](tf::Subflow &subflow) {
+			taskflow.emplace([server,&buildInfos,&buildInfosMutex,&getLastModifiedInDB](tf::Subflow &subflow) {
 				// fetch data
-				auto str = fetchDataFromURL(STR(server << "/data/.data.json"));
+				auto [waived, str] = fetchDataFromURL(STR(server << "/data/.data.json"));
 
 				// parse JSON with masterbuilds for this server
 				for (auto &mastername : Parser::parseServerMasterBuilds(F(json::parse(str), "masternames")))
-					subflow.emplace([mastername,server,&buildInfos,&buildInfosMutex](tf::Subflow &subflow) {
+					subflow.emplace([mastername,server,&buildInfos,&buildInfosMutex,&getLastModifiedInDB](tf::Subflow &subflow) {
 						// fetch data
-						auto str = fetchDataFromURL(STR(server << "/data/" << mastername << "/.data.json"));
+						auto [waived, str] = fetchDataFromURL(STR(server << "/data/" << mastername << "/.data.json"));
 
 						// check
 						if (str.rfind("<html>", 0) == 0)
@@ -516,12 +594,17 @@ static void fetchBuildInfo(
 
 						// process all builds in this masterbuild
 						for (auto &bi : bis)
-							subflow.emplace([bi,server,mastername]() {
+							subflow.emplace([bi,server,mastername,&getLastModifiedInDB]() {
 								// fetch data
-								auto str = fetchDataFromURL(STR(server << "/data/" << mastername << "/" << bi->buildname << "/.data.json"));
+								auto [waived, str] = fetchDataFromURL(
+									STR(server << "/data/" << mastername << "/" << bi->buildname << "/.data.json"),
+									getLastModifiedInDB(mastername, bi->buildname),
+									&bi->last_modified
+								);
 
 								// parse JSON with build details
-								Parser::parseBuildDetails(json::parse(str), *bi, mastername);
+								if (!(bi->waived = waived))
+									Parser::parseBuildDetails(json::parse(str), *bi, mastername);
 							});
 					});
 			});
@@ -531,17 +614,8 @@ static void fetchBuildInfo(
 	}
 }
 
-static void writeBuildInfoToDB(const BuildInfos &buildInfos){
+static void writeBuildInfoToDB(const BuildInfos &buildInfos, SQLite::Database &db){
 	MSG("saving builds into the database")
-
-	// DB object
-	SQLite::Database db(
-		::getenv("BUILDSDB_DATABASE") ? ::getenv("BUILDSDB_DATABASE") : "builds.sqlite",
-		SQLite::OPEN_READWRITE|SQLite::OPEN_CREATE
-	);
-
-	// create schema
-	db.exec(dbSchema);
 
 	// enable foreign keys
 	db.exec("PRAGMA foreign_keys = ON"); // this doesn't cause performance problem practically, otheriwse PRAGMA foreign_key_check; should be run in the end
@@ -566,7 +640,7 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos){
 		SQL_STMT(stmtSelectServer, "SELECT id FROM server WHERE url=?")
 		stmtSelectServer.bind(1, s.first);
 		stmtSelectServer.executeStep();
-		unsigned server_id = stmtSelectServer.getColumn(0);
+		const unsigned server_id = stmtSelectServer.getColumn(0);
 
 		// by masterbuilds on this server
 		for (auto m : s.second) {
@@ -583,99 +657,104 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos){
 				stmtSelectMasterbuild.bind(2, m.first/*masterbuild*/);
 				(void)stmtSelectMasterbuild.executeStep();
 			}
-			unsigned masterbuild_id = stmtSelectMasterbuild.getColumn(0);
+			const unsigned masterbuild_id = stmtSelectMasterbuild.getColumn(0);
 
 			// by builds for this masterbuild
-			for (auto bi : m.second) {
-				SQL_STMT(stmtInsertBuild, "INSERT INTO build(masterbuild_id,name,started,ended,status) VALUES(?,?,?,?,?)")
-				SQL_STMT(stmtSelectBuild, "SELECT id FROM build WHERE masterbuild_id=? AND name=?")
-				stmtSelectBuild.bind(1, server_id);
-				stmtSelectBuild.bind(2, bi->buildname);
-				if (!stmtSelectBuild.executeStep()) {
-					stmtInsertBuild.bind(1, masterbuild_id);
-					stmtInsertBuild.bind(2, bi->buildname);
-					stmtInsertBuild.bind(3, bi->started);
-					if (bi->ended != 0)
-						stmtInsertBuild.bind(4, bi->started);
-					stmtInsertBuild.bind(5, bi->status);
-					stmtInsertBuild.exec();
-					stmtSelectBuild.reset();
+			for (auto bi : m.second)
+				if (!bi->waived) {
+					//MSG("DB: NOT waived masterbuild=" << m.first << "/" << bi->buildname)
+					SQL_STMT(stmtInsertBuild, "INSERT INTO build(masterbuild_id,name,started,ended,status,last_modified) VALUES(?,?,?,?,?,?)")
+					SQL_STMT(stmtSelectBuild, "SELECT id FROM build WHERE masterbuild_id=? AND name=?")
 					stmtSelectBuild.bind(1, masterbuild_id);
 					stmtSelectBuild.bind(2, bi->buildname);
-					(void)stmtSelectBuild.executeStep();
-				}
-				unsigned build_id = stmtSelectBuild.getColumn(0);
+					if (!stmtSelectBuild.executeStep()) {
+						stmtInsertBuild.bind(1, masterbuild_id);
+						stmtInsertBuild.bind(2, bi->buildname);
+						stmtInsertBuild.bind(3, bi->started);
+						if (bi->ended != 0)
+							stmtInsertBuild.bind(4, bi->ended);
+						stmtInsertBuild.bind(5, bi->status);
+						stmtInsertBuild.bind(6, bi->last_modified);
+						stmtInsertBuild.exec();
+						stmtSelectBuild.reset();
+						stmtSelectBuild.bind(1, masterbuild_id);
+						stmtSelectBuild.bind(2, bi->buildname);
+						(void)stmtSelectBuild.executeStep();
+					}
+					const unsigned build_id = stmtSelectBuild.getColumn(0);
 
-				// delete old and insert new records per-port
+					// delete old and insert new records per-port
 
-				SQLite::Transaction transaction(db);
+					SQLite::Transaction transaction(db);
 
-				// delete old records
-				//SQL_STMT(stmtDeleteTobuild, "DELETE FROM tobuild WHERE build_id=?")
-				SQL_STMT(stmtDeleteQueued,  "DELETE FROM queued WHERE build_id=?")
-				SQL_STMT(stmtDeleteBuilt,   "DELETE FROM built WHERE build_id=?")
-				SQL_STMT(stmtDeleteFailed,  "DELETE FROM failed WHERE build_id=?")
-				SQL_STMT(stmtDeleteIgnored, "DELETE FROM ignored WHERE build_id=?")
-				SQL_STMT(stmtDeleteSkipped, "DELETE FROM skipped WHERE build_id=?")
-				for (auto stmt : {/*&stmtDeleteTobuild,*/ &stmtDeleteQueued, &stmtDeleteBuilt, &stmtDeleteFailed, &stmtDeleteIgnored, &stmtDeleteSkipped}) {
-					stmt->bind(1, build_id);
-					stmt->exec();
-				}
+					// delete old records
+					//SQL_STMT(stmtDeleteTobuild, "DELETE FROM tobuild WHERE build_id=?")
+					SQL_STMT(stmtDeleteQueued,  "DELETE FROM queued WHERE build_id=?")
+					SQL_STMT(stmtDeleteBuilt,   "DELETE FROM built WHERE build_id=?")
+					SQL_STMT(stmtDeleteFailed,  "DELETE FROM failed WHERE build_id=?")
+					SQL_STMT(stmtDeleteIgnored, "DELETE FROM ignored WHERE build_id=?")
+					SQL_STMT(stmtDeleteSkipped, "DELETE FROM skipped WHERE build_id=?")
+					for (auto stmt : {/*&stmtDeleteTobuild,*/ &stmtDeleteQueued, &stmtDeleteBuilt, &stmtDeleteFailed, &stmtDeleteIgnored, &stmtDeleteSkipped}) {
+						stmt->bind(1, build_id);
+						stmt->exec();
+					}
 
-				// insert new records
-				//for (auto &tobuild : bi->tobuild) {
-				//	SQL_STMT(stmtInsertTobuild, "INSERT INTO tobuild VALUES(?,?,?)")
-				//	stmtInsertTobuild.bind(1, build_id);
-				//	stmtInsertTobuild.bind(2, tobuild.origin);
-				//	stmtInsertTobuild.bind(3, tobuild.pkgname);
-				//	stmtInsertTobuild.exec();
-				//}
-				for (auto &queued : bi->queued) {
-					SQL_STMT(stmtInsertQueued, "INSERT INTO queued VALUES(?,?,?,?)")
-					stmtInsertQueued.bind(1, build_id);
-					stmtInsertQueued.bind(2, queued.origin);
-					stmtInsertQueued.bind(3, queued.pkgname);
-					stmtInsertQueued.bind(4, queued.reason);
-					stmtInsertQueued.exec();
-				}
-				for (auto &built : bi->built) {
-					SQL_STMT(stmtInsertBuilt, "INSERT INTO built VALUES(?,?,?,?)")
-					stmtInsertBuilt.bind(1, build_id);
-					stmtInsertBuilt.bind(2, built.origin);
-					stmtInsertBuilt.bind(3, built.pkgname);
-					stmtInsertBuilt.bind(4, built.elapsed);
-					stmtInsertBuilt.exec();
-				}
-				for (auto &failed : bi->failed) {
-					SQL_STMT(stmtInsertFailed, "INSERT INTO failed VALUES(?,?,?,?,?,?)")
-					stmtInsertFailed.bind(1, build_id);
-					stmtInsertFailed.bind(2, failed.origin);
-					stmtInsertFailed.bind(3, failed.pkgname);
-					stmtInsertFailed.bind(4, failed.phase);
-					stmtInsertFailed.bind(5, failed.errortype);
-					stmtInsertFailed.bind(6, failed.elapsed);
-					stmtInsertFailed.exec();
-				}
-				for (auto &ignored : bi->ignored) {
-					SQL_STMT(stmtInsertIgnored, "INSERT INTO ignored VALUES(?,?,?,?)")
-					stmtInsertIgnored.bind(1, build_id);
-					stmtInsertIgnored.bind(2, ignored.origin);
-					stmtInsertIgnored.bind(3, ignored.pkgname);
-					stmtInsertIgnored.bind(4, ignored.reason);
-					stmtInsertIgnored.exec();
-				}
-				for (auto &skipped : bi->skipped) {
-					SQL_STMT(stmtInsertSkipped, "INSERT INTO skipped VALUES(?,?,?,?)")
-					stmtInsertSkipped.bind(1, build_id);
-					stmtInsertSkipped.bind(2, skipped.origin);
-					stmtInsertSkipped.bind(3, skipped.pkgname);
-					stmtInsertSkipped.bind(4, skipped.depends);
-					stmtInsertSkipped.exec();
-				}
+					// insert new records
+					//for (auto &tobuild : bi->tobuild) {
+					//	SQL_STMT(stmtInsertTobuild, "INSERT INTO tobuild VALUES(?,?,?)")
+					//	stmtInsertTobuild.bind(1, build_id);
+					//	stmtInsertTobuild.bind(2, tobuild.origin);
+					//	stmtInsertTobuild.bind(3, tobuild.pkgname);
+					//	stmtInsertTobuild.exec();
+					//}
+					for (auto &queued : bi->queued) {
+						SQL_STMT(stmtInsertQueued, "INSERT INTO queued VALUES(?,?,?,?)")
+						stmtInsertQueued.bind(1, build_id);
+						stmtInsertQueued.bind(2, queued.origin);
+						stmtInsertQueued.bind(3, queued.pkgname);
+						stmtInsertQueued.bind(4, queued.reason);
+						stmtInsertQueued.exec();
+					}
+					for (auto &built : bi->built) {
+						SQL_STMT(stmtInsertBuilt, "INSERT INTO built VALUES(?,?,?,?)")
+						stmtInsertBuilt.bind(1, build_id);
+						stmtInsertBuilt.bind(2, built.origin);
+						stmtInsertBuilt.bind(3, built.pkgname);
+						stmtInsertBuilt.bind(4, built.elapsed);
+						stmtInsertBuilt.exec();
+					}
+					for (auto &failed : bi->failed) {
+						SQL_STMT(stmtInsertFailed, "INSERT INTO failed VALUES(?,?,?,?,?,?)")
+						stmtInsertFailed.bind(1, build_id);
+						stmtInsertFailed.bind(2, failed.origin);
+						stmtInsertFailed.bind(3, failed.pkgname);
+						stmtInsertFailed.bind(4, failed.phase);
+						stmtInsertFailed.bind(5, failed.errortype);
+						stmtInsertFailed.bind(6, failed.elapsed);
+						stmtInsertFailed.exec();
+					}
+					for (auto &ignored : bi->ignored) {
+						SQL_STMT(stmtInsertIgnored, "INSERT INTO ignored VALUES(?,?,?,?)")
+						stmtInsertIgnored.bind(1, build_id);
+						stmtInsertIgnored.bind(2, ignored.origin);
+						stmtInsertIgnored.bind(3, ignored.pkgname);
+						stmtInsertIgnored.bind(4, ignored.reason);
+						stmtInsertIgnored.exec();
+					}
+					for (auto &skipped : bi->skipped) {
+						SQL_STMT(stmtInsertSkipped, "INSERT INTO skipped VALUES(?,?,?,?)")
+						stmtInsertSkipped.bind(1, build_id);
+						stmtInsertSkipped.bind(2, skipped.origin);
+						stmtInsertSkipped.bind(3, skipped.pkgname);
+						stmtInsertSkipped.bind(4, skipped.depends);
+						stmtInsertSkipped.exec();
+					}
 
-				// commit
-				transaction.commit();
-			}
+					// commit
+					transaction.commit();
+				} else {
+					//MSG("DB: YES waived masterbuild=" << m.first << "/" << bi->buildname)
+				}
 		}
 	}
 }
@@ -685,6 +764,15 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos){
 //
 
 static int mainGuarded(int argc, char* argv[]) {
+	// DB object
+	SQLite::Database db(
+		::getenv("BUILDSDB_DATABASE") ? ::getenv("BUILDSDB_DATABASE") : "builds.sqlite",
+		SQLite::OPEN_READWRITE|SQLite::OPEN_CREATE
+	);
+
+	// create schema
+	db.exec(dbSchema);
+
 	// fetch the build server list
 	auto servers = fetchServerList();
 
@@ -692,10 +780,10 @@ static int mainGuarded(int argc, char* argv[]) {
 	BuildInfos buildInfos; // [by-server][by-masterbuild]
 
 	// fetch build info
-	fetchBuildInfo(servers, buildInfos);
+	fetchBuildInfo(servers, buildInfos, db);
 
 	// write build info to DB
-	writeBuildInfoToDB(buildInfos);
+	writeBuildInfoToDB(buildInfos, db);
 
 	MSG("successfully imported builds from " << servers.size() << " server(s)")
 
