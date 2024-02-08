@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -28,7 +29,9 @@
 #include <SQLiteCpp/Transaction.h>
 #include <taskflow/taskflow.hpp>
 
+// type shortcuts
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 
 //
@@ -42,6 +45,7 @@ using json = nlohmann::json;
 	  return __ss__.str(); \
 	}())
 #define STR(msg...) __STR__(msg)
+#define CSTR(msg...) (STR(msg).c_str())
 #define __PRINT__(stream, msg...) \
 	{ \
 		stream << __STR__(msg << std::endl); \
@@ -180,7 +184,7 @@ static std::tuple<bool/*waived*/,std::string/*content*/> fetchDataFromURL(
 				//MSG("FETCH: YES waived request for URL=" << url)
 				return {true/*waived*/, ""};
 			}
-			//MSG("FETCH: NOT waived request for URL=" << url << ": knownLastModified=" << *knownLastModified << " != newLastModified=" << newLastModified)
+			MSG("FETCH: NOT waived request for URL=" << url << ": knownLastModified=" << *knownLastModified << " != newLastModified=" << newLastModified)
 		}
 
 		// string buffer
@@ -251,6 +255,11 @@ static bool HAS(json j, const char *name) {
 static unsigned S2U(const std::string &str) {
 	return (unsigned)std::stoul(str);
 }
+
+static std::string dbPath() {
+	return ::getenv("BUILDSDB_DATABASE") ? ::getenv("BUILDSDB_DATABASE") : "builds.sqlite";
+}
+
 
 //
 // structures
@@ -465,6 +474,23 @@ struct Parser {
 	}
 };
 
+struct Database : SQLite::Database {
+	Database(bool create)
+	: SQLite::Database(
+		dbPath().c_str(),
+		SQLite::OPEN_READWRITE|(create ? SQLite::OPEN_CREATE : 0)
+	) { }
+
+	static bool canOpenExistingDB() {
+		try {
+			Database(false);
+			return true;
+		} catch(...) {
+			return false;
+		}
+	}
+};
+
 //
 // main procedures
 //
@@ -498,7 +524,7 @@ static std::vector<std::string> fetchServerList() {
 static void fetchBuildInfo(
 	const std::vector<std::string> &servers,
 	BuildInfos &buildInfos,
-	SQLite::Database &db // only to retrieve lastModified
+	Database &db // only to retrieve lastModified
 ) {
 	// retrieve the build.last_modified field from DB so that we can skip builds that weren't changed
 	std::map<std::string/*masterbuild*/, std::map<std::string/*buildname*/, std::string/*last_modified*/>> lastModifiedInDB;
@@ -612,7 +638,7 @@ static void fetchBuildInfo(
 	}
 }
 
-static void writeBuildInfoToDB(const BuildInfos &buildInfos, SQLite::Database &db){
+static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 	MSG("saving builds into the database")
 
 	// enable foreign keys
@@ -643,6 +669,7 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, SQLite::Database &d
 		for (auto m : s.second) {
 			SQL_STMT(stmtInsertMasterbuild, "INSERT INTO masterbuild(server_id,name) VALUES(?,?)")
 			SQL_STMT(stmtSelectMasterbuild, "SELECT id FROM masterbuild WHERE server_id=? AND name=?")
+
 			stmtSelectMasterbuild.bind(1, server_id);
 			stmtSelectMasterbuild.bind(2, m.first/*masterbuild*/);
 			if (!stmtSelectMasterbuild.executeStep()) {
@@ -659,12 +686,15 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, SQLite::Database &d
 			// by builds for this masterbuild
 			for (auto bi : m.second)
 				if (!bi->waived) {
-					//MSG("DB: NOT waived masterbuild=" << m.first << "/" << bi->buildname)
+					MSG("DB: NOT waived masterbuild=" << m.first << "/" << bi->buildname)
+
+					SQL_STMT(stmtSelectBuild, "SELECT id, ended FROM build WHERE masterbuild_id=? AND name=?")
 					SQL_STMT(stmtInsertBuild, "INSERT INTO build(masterbuild_id,name,started,ended,status,last_modified) VALUES(?,?,?,?,?,?)")
-					SQL_STMT(stmtSelectBuild, "SELECT id FROM build WHERE masterbuild_id=? AND name=?")
+					SQL_STMT(stmtUpdateBuild, "UPDATE build SET ended=?, status=?, last_modified=? WHERE id=?")
+
 					stmtSelectBuild.bind(1, masterbuild_id);
 					stmtSelectBuild.bind(2, bi->buildname);
-					if (!stmtSelectBuild.executeStep()) {
+					if (!stmtSelectBuild.executeStep()) { // need to insert
 						stmtInsertBuild.bind(1, masterbuild_id);
 						stmtInsertBuild.bind(2, bi->buildname);
 						stmtInsertBuild.bind(3, bi->started);
@@ -677,6 +707,13 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, SQLite::Database &d
 						stmtSelectBuild.bind(1, masterbuild_id);
 						stmtSelectBuild.bind(2, bi->buildname);
 						(void)stmtSelectBuild.executeStep();
+					} else { // potentially need to update
+						if (bi->ended != 0)
+							stmtUpdateBuild.bind(1, bi->ended);
+						stmtUpdateBuild.bind(2, bi->status);
+						stmtUpdateBuild.bind(3, bi->last_modified);
+						stmtUpdateBuild.bind(4, (unsigned)stmtSelectBuild.getColumn(0));
+						stmtUpdateBuild.exec();
 					}
 					const unsigned build_id = stmtSelectBuild.getColumn(0);
 
@@ -757,15 +794,12 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, SQLite::Database &d
 }
 
 //
-// MAIN
+// main action functions
 //
 
-static int mainGuarded(int argc, char* argv[]) {
+static int doFetch() {
 	// DB object
-	SQLite::Database db(
-		::getenv("BUILDSDB_DATABASE") ? ::getenv("BUILDSDB_DATABASE") : "builds.sqlite",
-		SQLite::OPEN_READWRITE|SQLite::OPEN_CREATE
-	);
+	Database db(true);
 
 	// create schema
 	db.exec(dbSchema);
@@ -785,6 +819,97 @@ static int mainGuarded(int argc, char* argv[]) {
 	MSG("successfully imported builds from " << servers.size() << " server(s)")
 
 	return EXIT_SUCCESS;
+}
+
+static int usage(bool fail) {
+	PRINT("usage:")
+	PRINT("   buildsdb fetch")
+	PRINT("   or")
+	PRINT("   buildsdb query {query-name} {args...}")
+	PRINT("   or")
+	PRINT("   buildsdb stats")
+	PRINT("   or")
+	PRINT("   buildsdb help")
+
+	return fail ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+static int doStats() {
+	return EXIT_SUCCESS;
+}
+
+static int doQuery(const std::string &query, const std::vector<std::string> &args) {
+	// does DB exist?
+	if (!Database::canOpenExistingDB()) {
+		PRINT("the 'query' operation requires DB to be present, please run 'buildsdb fetch' first")
+		return EXIT_FAILURE;
+	}
+
+	// process the 'help' query
+	if (query == "help") {
+		// find path to the queryies directory
+		std::string queriesDir;
+		for (auto d : {"sql", PREFIX "/share/buildsdb/sql"}) {
+			auto dirPath = fs::path(d) / "query";
+			if (fs::exists(dirPath)) {
+				queriesDir = dirPath;
+				break;
+			}
+		}
+		if (queriesDir.empty())
+			FAIL("can't find queries directory")
+
+		// show all scripts
+		PRINT("available queries are:")
+		::system(CSTR("(cd " << queriesDir << " && ls | sed -e \"s|^|• |; s|\\.sql$||\")"));
+
+		return EXIT_SUCCESS;
+	}
+
+	// find path to the query SQL
+	std::string sqlScriptPath;
+	for (auto d : {"sql", PREFIX "/share/buildsdb/sql"}) {
+		auto dirPath = fs::path(d) / "query" / STR(query << ".sql");
+		if (fs::exists(dirPath)) {
+			sqlScriptPath = dirPath;
+			break;
+		}
+	}
+	if (sqlScriptPath.empty())
+		FAIL("query '" << query << "' doesn't exist")
+
+	// run SQL
+	auto res = ::system(CSTR("(echo .mode table; cat \"" << sqlScriptPath << "\") | sqlite3 " << dbPath()));
+	if (res != 0)
+		FAIL("query failed to execute")
+
+	// try to resolve 
+	return EXIT_SUCCESS;
+}
+
+//
+// MAIN
+//
+
+static int mainGuarded(int argc, char* argv[]) {
+	// process arguments
+	if (argc <= 1)
+		return usage(true);
+	else if (argc == 2) {
+		if (std::strcmp(argv[1], "fetch") == 0)
+			return doFetch();
+		else if (std::strcmp(argv[1], "stats") == 0)
+			return doStats();
+		else if (std::strcmp(argv[1], "help") == 0)
+			return usage(false);
+		else
+			return usage(true);
+	} else {
+		if (std::strcmp(argv[1], "query") == 0)
+			return doQuery(argv[2], std::vector<std::string>(argv + 3, argv + argc));
+		else
+			return usage(true);
+	}
 }
 
 int main(int argc, char* argv[]) {
