@@ -657,6 +657,9 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 		}
 	}
 
+	// global vars
+	unsigned bno = 0;
+
 	// update masterbuild, build, and further tables
 	for (auto s : buildInfos) {
 		// get server_id
@@ -686,7 +689,7 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 			// by builds for this masterbuild
 			for (auto bi : m.second)
 				if (!bi->waived) {
-					MSG("DB: NOT waived masterbuild=" << m.first << "/" << bi->buildname)
+					MSG("... saving the build #" << ++bno << ": " << m.first << "/" << bi->buildname)
 
 					SQL_STMT(stmtSelectBuild, "SELECT id, ended FROM build WHERE masterbuild_id=? AND name=?")
 					SQL_STMT(stmtInsertBuild, "INSERT INTO build(masterbuild_id,name,started,ended,status,last_modified) VALUES(?,?,?,?,?,?)")
