@@ -878,8 +878,15 @@ static int doQuery(const std::string &query, const std::vector<std::string> &arg
 	if (sqlScriptPath.empty())
 		FAIL("query '" << query << "' doesn't exist")
 
+	// convert arguments
+	std::string sargs;
+	for (auto &arg : args)
+		sargs += STR(" " << arg);
+
 	// run SQL
-	auto res = ::system(CSTR("(echo .mode table; cat \"" << sqlScriptPath << "\") | sqlite3 " << dbPath()));
+	auto res = ::system(CSTR(
+		"(echo .mode table; SQL=$(cat " << sqlScriptPath << "); SQL=\"$(printf \"$SQL\"" << sargs << ")\"; echo \"$SQL\") | sqlite3 " << dbPath()
+	));
 	if (res != 0)
 		FAIL("query failed to execute")
 
