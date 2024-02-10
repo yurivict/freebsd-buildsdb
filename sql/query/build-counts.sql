@@ -15,5 +15,6 @@ FROM
 WHERE
 	m.id = b.masterbuild_id
 ORDER BY
-	m.name,
-	b.started
+	Started,
+	Masterbuild,
+	Build

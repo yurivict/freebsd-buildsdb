@@ -69,6 +69,12 @@ namespace fs = std::filesystem;
 extern const char *dbSchema;
 
 //
+// global variables
+//
+
+static std::string argv0;
+
+//
 // types
 //
 
@@ -184,7 +190,7 @@ static std::tuple<bool/*waived*/,std::string/*content*/> fetchDataFromURL(
 				//MSG("FETCH: YES waived request for URL=" << url)
 				return {true/*waived*/, ""};
 			}
-			MSG("FETCH: NOT waived request for URL=" << url << ": knownLastModified=" << *knownLastModified << " != newLastModified=" << newLastModified)
+			//MSG("FETCH: NOT waived request for URL=" << url << ": knownLastModified=" << *knownLastModified << " != newLastModified=" << newLastModified)
 		}
 
 		// string buffer
@@ -254,6 +260,10 @@ static bool HAS(json j, const char *name) {
 
 static unsigned S2U(const std::string &str) {
 	return (unsigned)std::stoul(str);
+}
+
+static json fixupReplaceEmptyWithZero(const json &j) {
+	return j.empty() ? j : json("0");
 }
 
 static std::string dbPath() {
@@ -430,7 +440,7 @@ struct Parser {
 						},
 						F(j, "phase"),
 						F(j, "errortype"),
-						S2U(F(j, "elapsed"))
+						S2U(fixupReplaceEmptyWithZero(F(j, "elapsed"))) // 'elapsed' can be empty when it fails in the 'starting' phase
 					};
 				});
 			else if (i.key() == "ignored")
@@ -505,6 +515,8 @@ static std::vector<std::string> fetchServerList() {
 		"  jq -r \".. | select(.started? > $(date -v -2w +%s)) | .server\" | sort -u"
 	);
 	DEBUG("servers: " << serversStr)
+
+	//serversStr = serversStr + "foul1\nfoul2";
 
 	// decorate their names
 	for (auto s : splitString(serversStr, '\n'))
@@ -638,7 +650,7 @@ static void fetchBuildInfo(
 	}
 }
 
-static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
+static unsigned writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db) {
 	MSG("saving builds into the database")
 
 	// enable foreign keys
@@ -660,8 +672,15 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 	// global vars
 	unsigned bno = 0;
 
+	unsigned numberBuildsToSave = 0;
+	for (auto s : buildInfos)
+		for (auto &m : s.second)
+			for (auto &bi : m.second)
+				if (!bi->waived)
+					numberBuildsToSave++;
+
 	// update masterbuild, build, and further tables
-	for (auto s : buildInfos) {
+	for (auto &s : buildInfos) {
 		// get server_id
 		SQL_STMT(stmtSelectServer, "SELECT id FROM server WHERE url=?")
 		stmtSelectServer.bind(1, s.first);
@@ -669,7 +688,7 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 		const unsigned server_id = stmtSelectServer.getColumn(0);
 
 		// by masterbuilds on this server
-		for (auto m : s.second) {
+		for (auto &m : s.second) {
 			SQL_STMT(stmtInsertMasterbuild, "INSERT INTO masterbuild(server_id,name) VALUES(?,?)")
 			SQL_STMT(stmtSelectMasterbuild, "SELECT id FROM masterbuild WHERE server_id=? AND name=?")
 
@@ -687,9 +706,9 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 			const unsigned masterbuild_id = stmtSelectMasterbuild.getColumn(0);
 
 			// by builds for this masterbuild
-			for (auto bi : m.second)
+			for (auto &bi : m.second)
 				if (!bi->waived) {
-					MSG("... saving the build #" << ++bno << ": " << m.first << "/" << bi->buildname)
+					MSG("... saving the build #" << ++bno << " of " << numberBuildsToSave << ": " << m.first << "/" << bi->buildname)
 
 					SQL_STMT(stmtSelectBuild, "SELECT id, ended FROM build WHERE masterbuild_id=? AND name=?")
 					SQL_STMT(stmtInsertBuild, "INSERT INTO build(masterbuild_id,name,started,ended,status,last_modified) VALUES(?,?,?,?,?,?)")
@@ -794,6 +813,8 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 				}
 		}
 	}
+
+	return numberBuildsToSave; // number of saved builds
 }
 
 //
@@ -802,7 +823,7 @@ static void writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db){
 
 static int doFetch() {
 	// DB object
-	Database db(true);
+	Database db(true/*create*/);
 
 	// create schema
 	db.exec(dbSchema);
@@ -817,9 +838,9 @@ static int doFetch() {
 	fetchBuildInfo(servers, buildInfos, db);
 
 	// write build info to DB
-	writeBuildInfoToDB(buildInfos, db);
+	auto numBuilds = writeBuildInfoToDB(buildInfos, db);
 
-	MSG("successfully imported builds from " << servers.size() << " server(s)")
+	MSG("successfully imported " << numBuilds << " build(s) from " << servers.size() << " server(s)")
 
 	return EXIT_SUCCESS;
 }
@@ -864,7 +885,7 @@ static int doQuery(const std::string &query, const std::vector<std::string> &arg
 
 		// show all scripts
 		PRINT("available queries are:")
-		::system(CSTR("(cd " << queriesDir << " && ls | sed -e \"s|^|• |; s|\\.sql$||\")"));
+		::system(CSTR("(cd " << queriesDir << " && ls | sed -e \"s|^|• |; s|\\.sql$||\") | sort"));
 
 		return EXIT_SUCCESS;
 	}
@@ -879,7 +900,7 @@ static int doQuery(const std::string &query, const std::vector<std::string> &arg
 		}
 	}
 	if (sqlScriptPath.empty())
-		FAIL("query '" << query << "' doesn't exist")
+		FAIL("query '" << query << "' doesn't exist, execute '" << argv0 << " query help' for the list of available queries")
 
 	// convert arguments
 	std::string sargs;
@@ -902,6 +923,9 @@ static int doQuery(const std::string &query, const std::vector<std::string> &arg
 //
 
 static int mainGuarded(int argc, char* argv[]) {
+	// save argv0
+	argv0 = argv[0];
+
 	// process arguments
 	if (argc <= 1)
 		return usage(true);
