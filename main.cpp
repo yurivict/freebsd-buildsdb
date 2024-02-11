@@ -103,6 +103,10 @@ static std::string timestamp() {
 
 }
 
+static bool contains(const std::string &str, char chr) {
+	return str.find(chr) != std::string::npos;
+}
+
 static bool contains(const std::string &str, const char *small) {
 	return str.find(small) != std::string::npos;
 }
@@ -896,11 +900,11 @@ static int usage(bool fail) {
 	PRINT("   or")
 	PRINT("   buildsdb stats")
 	PRINT("   or")
-	PRINT("   buildsdb show-masterbuild {|enable|disable}")
+	PRINT("   buildsdb show-masterbuilds {|enable|disable}")
 	PRINT("   or")
-	PRINT("   buildsdb enable-masterbuild {masterbuild pattern}")
+	PRINT("   buildsdb enable-masterbuilds {masterbuild pattern, or tier1, or tier2}")
 	PRINT("   or")
-	PRINT("   buildsdb disable-masterbuild {masterbuild pattern}")
+	PRINT("   buildsdb disable-masterbuilds {masterbuild pattern, or tier1, or tier2}")
 	PRINT("   or")
 	PRINT("   buildsdb help")
 
@@ -911,19 +915,41 @@ static int doStats() {
 	return EXIT_SUCCESS;
 }
 
-static int doEnableMasterbuilds(const std::string &masterbuild_pattern, bool enable) {
+static int doEnableMasterbuilds(const std::vector<std::string> &masterbuild_patterns, bool enable) {
 	// checks
 	if (!checkDbIsPresentWithMessage(enable ? "enable-masterbuilds" : "disable-masterbuilds"))
 		return EXIT_FAILURE;
-	if (masterbuild_pattern.empty())
-		FAIL("masterbuld pattern can't be empty")
+	for (auto &pattern : masterbuild_patterns) {
+		if (pattern.empty())
+			FAIL("masterbuld pattern can't be empty")
+		if (contains(pattern, '\''))
+			FAIL("masterbuld pattern can't contain the ' (quote) character")
+	}
 
-	// execute query
-	SQLite::Statement(
-		Database(false/*not create*/),
-		STR("UPDATE masterbuild SET enabled=" << (enable ? '1' : '0') << " WHERE name LIKE '%" << masterbuild_pattern << "%'")
-	).exec();
-	PRINT("Masterbuilds *" << masterbuild_pattern << "* were " << (enable ? "enabled" : "disabled") << ".")
+	// expand patterns
+	std::vector<std::string> masterbuild_patterns_expanded;
+	for (auto &pattern : masterbuild_patterns)
+		if (pattern == "tier1")
+			for (auto p : {"amd64", "arm64"})
+				masterbuild_patterns_expanded.push_back(p);
+		else if (pattern == "tier2")
+			for (auto p : {"i386", "armv7", "powerpc"})
+				masterbuild_patterns_expanded.push_back(p);
+		else
+			masterbuild_patterns_expanded.push_back(pattern);
+
+	{ // execute queries
+		Database db(false/*not create*/);
+		SQLite::Transaction transaction(db);
+		for (auto &pattern : masterbuild_patterns_expanded) {
+			SQLite::Statement(
+				db,
+				STR("UPDATE masterbuild SET enabled=" << (enable ? '1' : '0') << " WHERE name LIKE '%" << pattern << "%'")
+			).exec();
+			PRINT("Masterbuilds *" << pattern << "* were " << (enable ? "enabled" : "disabled") << ".")
+		}
+		transaction.commit();
+	}
 
 	// show enabled
 	PRINT("The list of currently 'enabled' flags for masterbuilds is:")
@@ -1025,9 +1051,9 @@ static int mainGuarded(int argc, char* argv[]) {
 	} else {
 		if (argc == 3) {
 			if (equals(argv[1], "enable-masterbuilds"))
-				return doEnableMasterbuilds(argv[2], true);
+				return doEnableMasterbuilds({std::string(argv[2])}, true);
 			else if (equals(argv[1], "disable-masterbuilds"))
-				return doEnableMasterbuilds(argv[2], false);
+				return doEnableMasterbuilds({std::string(argv[2])}, false);
 			else if (equals(argv[1], "show-masterbuilds") && equals(argv[2], "enabled"))
 				return doShowMasterbuilds(Yes);
 			else if (equals(argv[1], "show-masterbuilds") && equals(argv[2], "disabled"))
