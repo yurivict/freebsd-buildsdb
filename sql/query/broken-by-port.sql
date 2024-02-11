@@ -1,7 +1,6 @@
 
 --
--- broken-grouped-by-port.sql: returns a list of currently broken ports
---                             grouped by the port's origin
+-- broken-by-port.sql: returns a list of currently broken ports grouped by port
 --
 
 SELECT

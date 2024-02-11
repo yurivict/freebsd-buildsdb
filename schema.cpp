@@ -14,6 +14,7 @@ const char *dbSchema = R"(
 		id              INTEGER PRIMARY KEY AUTOINCREMENT,
 		server_id       INTEGER NOT NULL,
 		name            TEXT NOT NULL UNIQUE,
+		enabled         INTEGER NOT NULL,
 		FOREIGN KEY (server_id) REFERENCES server(id)
 	);
 	CREATE TABLE IF NOT EXISTS build (
@@ -126,6 +127,26 @@ const char *dbSchema = R"(
 			LIMIT 1
 		)
 	;
+	CREATE VIEW IF NOT EXISTS ignored_last AS
+	SELECT
+		*
+	FROM
+		ignored i
+	WHERE
+		i.build_id = (
+			SELECT
+				id
+			FROM
+				build
+			WHERE
+				masterbuild_id = (SELECT masterbuild_id FROM build WHERE id = i.build_id)
+				AND
+				EXISTS (SELECT * FROM ignored WHERE origin = i.origin AND build_id = id)
+			ORDER BY
+				started DESC
+			LIMIT 1
+		)
+	;
 	CREATE VIEW IF NOT EXISTS broken AS
 	SELECT
 		m.id AS masterbuild_id,
@@ -137,7 +158,8 @@ const char *dbSchema = R"(
 		f.errortype AS errortype,
 		f.elapsed AS elapsed,
 		bf.started AS last_failed,
-		(SELECT started FROM build WHERE id = s.build_id) AS last_succeeded
+		(SELECT started FROM build WHERE id = s.build_id) AS last_succeeded,
+		(SELECT started FROM build WHERE id = i.build_id) AS last_ignored
 	FROM
 		masterbuild m,
 		build bf,
@@ -148,15 +170,27 @@ const char *dbSchema = R"(
 		s.build_id in (SELECT id FROM build WHERE masterbuild_id = m.id)
 		AND
 		s.origin = f.origin
+	LEFT JOIN
+		ignored_last i
+	ON
+		i.build_id in (SELECT id FROM build WHERE masterbuild_id = m.id)
+		AND
+		i.origin = f.origin
 	WHERE
 		m.id = bf.masterbuild_id
+		AND
+		m.enabled = '1'
 		AND
 		bf.id = f.build_id
 		AND
 		(
-			last_succeeded IS NULL
+			(last_succeeded IS NULL AND last_ignored IS NULL)
 			OR
-			last_failed > last_succeeded
+			(last_succeeded IS NOT NULL AND last_ignored IS NULL AND last_failed > last_succeeded)
+			OR
+			(last_succeeded IS NULL AND last_ignored IS NOT NULL AND last_failed > last_ignored)
+			OR
+			(last_succeeded IS NOT NULL AND last_ignored IS NOT NULL AND last_failed > max(last_succeeded, last_ignored))
 		)
 	ORDER BY
 		last_failed

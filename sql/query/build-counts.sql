@@ -14,6 +14,8 @@ FROM
 	build b
 WHERE
 	m.id = b.masterbuild_id
+	AND
+	m.enabled = '1'
 ORDER BY
 	Started,
 	Masterbuild,

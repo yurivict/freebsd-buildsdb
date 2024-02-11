@@ -63,6 +63,12 @@ namespace fs = std::filesystem;
 #define DEBUG(msg...) // PRINT("DEBUG: " << msg) // disable this macro for production
 
 //
+// consts
+//
+
+enum YesNoAny {Yes, No, Any};
+
+//
 // extern declarations
 //
 
@@ -95,6 +101,14 @@ static std::string timestamp() {
 
     return buf;
 
+}
+
+static bool contains(const std::string &str, const char *small) {
+	return str.find(small) != std::string::npos;
+}
+
+static bool equals(const char *str, const char *other) {
+	return ::strcmp(str, other) == 0;
 }
 
 static std::string execCommand(const char* cmd) {
@@ -154,7 +168,7 @@ static std::tuple<bool/*waived*/,std::string/*content*/> fetchDataFromURL(
 	auto getOneHeader = [](CURL *curl, const char *header_name) -> std::string {
 		struct curl_header *prev = nullptr;
 		while (auto h = curl_easy_nextheader(curl, CURLH_HEADER, 0, prev)) {
-			if (::strcmp(h->name, header_name) == 0) {
+			if (equals(h->name, header_name)) {
 				return h->value;
 			}
 			prev = h;
@@ -653,6 +667,17 @@ static void fetchBuildInfo(
 static unsigned writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db) {
 	MSG("saving builds into the database")
 
+	// helpers
+	auto enableInitially = [](const std::string &masterbuild) {
+		bool disabled =
+			contains(masterbuild, "124") // obsolete
+			||
+			contains(masterbuild, "powerpc") // too many failures on powerpc compared to other archs
+			;
+
+		return !disabled;
+	};
+
 	// enable foreign keys
 	db.exec("PRAGMA foreign_keys = ON"); // this doesn't cause performance problem practically, otheriwse PRAGMA foreign_key_check; should be run in the end
 
@@ -689,14 +714,15 @@ static unsigned writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db) {
 
 		// by masterbuilds on this server
 		for (auto &m : s.second) {
-			SQL_STMT(stmtInsertMasterbuild, "INSERT INTO masterbuild(server_id,name) VALUES(?,?)")
+			SQL_STMT(stmtInsertMasterbuild, "INSERT INTO masterbuild(server_id,name,enabled) VALUES(?,?,?)")
 			SQL_STMT(stmtSelectMasterbuild, "SELECT id FROM masterbuild WHERE server_id=? AND name=?")
 
 			stmtSelectMasterbuild.bind(1, server_id);
 			stmtSelectMasterbuild.bind(2, m.first/*masterbuild*/);
 			if (!stmtSelectMasterbuild.executeStep()) {
 				stmtInsertMasterbuild.bind(1, server_id);
-				stmtInsertMasterbuild.bind(2, m.first/*masterbuild*/);
+				stmtInsertMasterbuild.bind(2, m.first/*masterbuild_name*/);
+				stmtInsertMasterbuild.bind(3, enableInitially(m.first) ? 1 : 0 /*enabled*/);
 				stmtInsertMasterbuild.exec();
 				stmtSelectMasterbuild.reset();
 				stmtSelectMasterbuild.bind(1, server_id);
@@ -817,6 +843,23 @@ static unsigned writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db) {
 	return numberBuildsToSave; // number of saved builds
 }
 
+static bool checkDbIsPresentWithMessage(const std::string &op) {
+	if (!Database::canOpenExistingDB()) {
+		PRINT("the '" << op << "' operation requires DB to be present, please run 'buildsdb fetch' first")
+		return false;
+	}
+
+	return true;
+}
+
+static void printSelectResult(const std::string &selectSql) {
+	auto res = ::system(CSTR(
+		"(echo .mode table; echo '" << selectSql << "') | sqlite3 " << dbPath()
+	));
+	if (res != 0)
+		FAIL("SQL query failed to execute")
+}
+
 //
 // main action functions
 //
@@ -853,6 +896,12 @@ static int usage(bool fail) {
 	PRINT("   or")
 	PRINT("   buildsdb stats")
 	PRINT("   or")
+	PRINT("   buildsdb show-masterbuild {|enable|disable}")
+	PRINT("   or")
+	PRINT("   buildsdb enable-masterbuild {masterbuild pattern}")
+	PRINT("   or")
+	PRINT("   buildsdb disable-masterbuild {masterbuild pattern}")
+	PRINT("   or")
 	PRINT("   buildsdb help")
 
 	return fail ? EXIT_FAILURE : EXIT_SUCCESS;
@@ -862,12 +911,45 @@ static int doStats() {
 	return EXIT_SUCCESS;
 }
 
-static int doQuery(const std::string &query, const std::vector<std::string> &args) {
-	// does DB exist?
-	if (!Database::canOpenExistingDB()) {
-		PRINT("the 'query' operation requires DB to be present, please run 'buildsdb fetch' first")
+static int doEnableMasterbuilds(const std::string &masterbuild_pattern, bool enable) {
+	// checks
+	if (!checkDbIsPresentWithMessage(enable ? "enable-masterbuilds" : "disable-masterbuilds"))
 		return EXIT_FAILURE;
-	}
+	if (masterbuild_pattern.empty())
+		FAIL("masterbuld pattern can't be empty")
+
+	// execute query
+	SQLite::Statement(
+		Database(false/*not create*/),
+		STR("UPDATE masterbuild SET enabled=" << (enable ? '1' : '0') << " WHERE name LIKE '%" << masterbuild_pattern << "%'")
+	).exec();
+	PRINT("Masterbuilds *" << masterbuild_pattern << "* were " << (enable ? "enabled" : "disabled") << ".")
+
+	// show enabled
+	PRINT("The list of currently 'enabled' flags for masterbuilds is:")
+	printSelectResult("SELECT name AS Masterbuild, enabled AS Enabled FROM masterbuild ORDER BY name");
+
+	return EXIT_SUCCESS;
+}
+
+static int doShowMasterbuilds(YesNoAny yna) {
+	// checks
+	if (!checkDbIsPresentWithMessage("show-masterbuilds"))
+		return EXIT_FAILURE;
+
+	// print
+	if (yna == Any)
+		printSelectResult("SELECT name AS Masterbuild, enabled AS Enabled FROM masterbuild ORDER BY name");
+	else
+		printSelectResult(STR("SELECT name AS Masterbuild, enabled AS Enabled FROM masterbuild WHERE enabled=" << (yna == Yes ? '1' : '0') << " ORDER BY name"));
+
+	return EXIT_SUCCESS;
+}
+
+static int doQuery(const std::string &query, const std::vector<std::string> &args) {
+	// checks
+	if (!checkDbIsPresentWithMessage("query"))
+		return EXIT_FAILURE;
 
 	// process the 'help' query
 	if (query == "help") {
@@ -912,7 +994,7 @@ static int doQuery(const std::string &query, const std::vector<std::string> &arg
 		"(echo .mode table; SQL=$(cat " << sqlScriptPath << "); SQL=\"$(printf \"$SQL\"" << sargs << ")\"; echo \"$SQL\") | sqlite3 " << dbPath()
 	));
 	if (res != 0)
-		FAIL("query failed to execute")
+		FAIL("SQL query failed to execute")
 
 	// try to resolve 
 	return EXIT_SUCCESS;
@@ -930,19 +1012,34 @@ static int mainGuarded(int argc, char* argv[]) {
 	if (argc <= 1)
 		return usage(true);
 	else if (argc == 2) {
-		if (std::strcmp(argv[1], "fetch") == 0)
+		if (equals(argv[1], "fetch"))
 			return doFetch();
-		else if (std::strcmp(argv[1], "stats") == 0)
+		else if (equals(argv[1], "stats"))
 			return doStats();
-		else if (std::strcmp(argv[1], "help") == 0)
+		else if (equals(argv[1], "show-masterbuilds"))
+			return doShowMasterbuilds(Any); // no additional args => Any
+		else if (equals(argv[1], "help"))
 			return usage(false);
 		else
 			return usage(true);
 	} else {
-		if (std::strcmp(argv[1], "query") == 0)
+		if (argc == 3) {
+			if (equals(argv[1], "enable-masterbuilds"))
+				return doEnableMasterbuilds(argv[2], true);
+			else if (equals(argv[1], "disable-masterbuilds"))
+				return doEnableMasterbuilds(argv[2], false);
+			else if (equals(argv[1], "show-masterbuilds") && equals(argv[2], "enabled"))
+				return doShowMasterbuilds(Yes);
+			else if (equals(argv[1], "show-masterbuilds") && equals(argv[2], "disabled"))
+				return doShowMasterbuilds(No);
+			else
+				{ } // fallthrough
+		}
+		if (equals(argv[1], "query"))
 			return doQuery(argv[2], std::vector<std::string>(argv + 3, argv + argc));
-		else
-			return usage(true);
+
+		// fail to parse arguments
+		return usage(true);
 	}
 }
 

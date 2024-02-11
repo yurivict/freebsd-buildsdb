@@ -23,6 +23,8 @@ LEFT JOIN
 	built s
 ON
 	m.id = bs.masterbuild_id
+	AND
+	m.enabled = '1'
 WHERE
 	bf.id = f.build_id
 	AND

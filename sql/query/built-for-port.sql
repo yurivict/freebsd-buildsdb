@@ -17,6 +17,8 @@ ON
 WHERE
 	m.id = b.masterbuild_id
 	AND
+	m.enabled = '1'
+	AND
 	s.origin = '%s'
 ORDER BY
 	BuildStarted,

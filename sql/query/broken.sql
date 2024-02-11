@@ -1,7 +1,6 @@
 
 --
--- broken.sql: returns a detailed list of currently broken ports
---             by masterbuild
+-- broken.sql: returns a detailed list of currently broken ports by masterbuild
 --
 
 SELECT
