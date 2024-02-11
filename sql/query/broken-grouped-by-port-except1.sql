@@ -10,7 +10,8 @@ SELECT
 	GROUP_CONCAT(DISTINCT f.phase) AS Phase,
 	GROUP_CONCAT(DISTINCT f.errortype) AS ErrorType,
 	datetime(max(bf.started), 'unixepoch', 'localtime') AS LastFailed,
-	datetime(max(bs.started), 'unixepoch', 'localtime') AS LastSuccessful
+	datetime(max(bs.started), 'unixepoch', 'localtime') AS LastSuccessful,
+	datetime(max(last_skipped), 'unixepoch', 'localtime') AS LastSkipped
 FROM
 	masterbuild m
 LEFT OUTER JOIN

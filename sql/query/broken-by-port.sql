@@ -9,7 +9,8 @@ SELECT
 	GROUP_CONCAT(DISTINCT phase) AS Phase,
 	GROUP_CONCAT(DISTINCT errortype) AS ErrorType,
 	datetime(max(last_failed), 'unixepoch', 'localtime') AS LastFailed,
-	datetime(max(last_succeeded), 'unixepoch', 'localtime') AS LastSucceeded
+	datetime(max(last_succeeded), 'unixepoch', 'localtime') AS LastSucceeded,
+	datetime(max(last_skipped), 'unixepoch', 'localtime') AS LastSkipped
 FROM
 	broken
 GROUP BY

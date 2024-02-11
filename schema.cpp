@@ -172,6 +172,26 @@ const char *dbSchema = R"(
 			LIMIT 1
 		)
 	;
+	CREATE VIEW IF NOT EXISTS skipped_last AS
+	SELECT
+		*
+	FROM
+		skipped s
+	WHERE
+		s.build_id = (
+			SELECT
+				id
+			FROM
+				build
+			WHERE
+				masterbuild_id = (SELECT masterbuild_id FROM build WHERE id = s.build_id)
+				AND
+				EXISTS (SELECT * FROM skipped WHERE origin = s.origin AND build_id = id)
+			ORDER BY
+				started DESC
+			LIMIT 1
+		)
+	;
 	CREATE VIEW IF NOT EXISTS broken AS
 	SELECT
 		m.id AS masterbuild_id,
@@ -184,7 +204,8 @@ const char *dbSchema = R"(
 		f.elapsed AS elapsed,
 		bf.started AS last_failed,
 		(SELECT started FROM build WHERE id = s.build_id) AS last_succeeded,
-		(SELECT started FROM build WHERE id = i.build_id) AS last_ignored
+		(SELECT started FROM build WHERE id = i.build_id) AS last_ignored,
+		(SELECT started FROM build WHERE id = k.build_id) AS last_skipped
 	FROM
 		masterbuild m,
 		build bf,
@@ -201,6 +222,12 @@ const char *dbSchema = R"(
 		i.build_id in (SELECT id FROM build WHERE masterbuild_id = m.id)
 		AND
 		i.origin = f.origin
+	LEFT JOIN
+		skipped_last k
+	ON
+		k.build_id in (SELECT id FROM build WHERE masterbuild_id = m.id)
+		AND
+		k.origin = f.origin
 	WHERE
 		m.id = bf.masterbuild_id
 		AND
