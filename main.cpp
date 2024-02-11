@@ -871,6 +871,12 @@ static void printSelectResult(const std::string &selectSql) {
 //
 
 static int doFetch() {
+	// message
+	if (Database::canOpenExistingDB())
+		MSG("performing an incremental fetch when only the updates and new builds will be fetched")
+	else
+		MSG("no BuildsDB database was found, performing a complete fetch - this can take up to 20 minutes")
+
 	// DB object
 	Database db(true/*create*/);
 
