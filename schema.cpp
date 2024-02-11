@@ -87,6 +87,31 @@ const char *dbSchema = R"(
 	-- Views
 	--
 
+	CREATE VIEW IF NOT EXISTS server_masterbuild_build AS -- this view is for debugging purposes only
+	SELECT
+		s.id AS server_id,
+		s.url AS server_url,
+		m.id AS masterbuild_id,
+		m.name AS masterbuild_name,
+		m.enabled AS masterbuild_enabled,
+		b.id AS build_id,
+		b.name AS build_name,
+		b.started AS build_started_raw,
+		datetime(b.started, 'unixepoch', 'localtime') AS build_started_str,
+		b.ended AS build_ended_raw,
+		datetime(b.ended, 'unixepoch', 'localtime') AS build_ended_str,
+		b.status AS build_status,
+		b.last_modified AS build_last_modified
+	FROM
+		server s,
+		masterbuild m,
+		build b
+	WHERE
+		s.id = m.server_id
+		AND
+		m.id = b.masterbuild_id
+	;
+
 	CREATE VIEW IF NOT EXISTS failed_last AS
 	SELECT
 		*
