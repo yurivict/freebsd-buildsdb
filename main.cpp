@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <sstream>
 #include <string>
@@ -523,9 +524,7 @@ struct Database : SQLite::Database {
 // main procedures
 //
 
-static std::vector<std::string> fetchServerList() {
-	std::vector<std::string> servers;
-
+static std::set<std::string> fetchServerList() {
 	// retrieve the list of servers
 	auto serversStr = execCommand(
 		"set -euo pipefail\n"
@@ -536,23 +535,23 @@ static std::vector<std::string> fetchServerList() {
 
 	//serversStr = serversStr + "foul1\nfoul2";
 
-	// decorate their names
+	// split string and decorate their names into URLs
+	std::set<std::string> serverURLs;
 	for (auto s : splitString(serversStr, '\n'))
-	//for (auto s : {"beefy8"})
-		//servers.push_back(STR("http://" << s << ".nyi.freebsd.org")); // via IPv6
-		servers.push_back(STR("https://pkg-status.freebsd.org/" << s)); // via IPv4
+		//serverURLs.insert(STR("http://" << s << ".nyi.freebsd.org")); // via IPv6
+		serverURLs.insert(STR("https://pkg-status.freebsd.org/" << s)); // via IPv4
 
 	// check
-	if (servers.empty())
+	if (serverURLs.empty())
 		FAIL("failed to fetch the build server list: it is empty")
 
-	MSG("found " << servers.size() << " build servers")
+	MSG("found " << serverURLs.size() << " build servers")
 
-	return servers;
+	return serverURLs;
 }
 
 static void fetchBuildInfo(
-	const std::vector<std::string> &servers,
+	const std::set<std::string> &servers,
 	BuildInfos &buildInfos,
 	Database &db // only to retrieve lastModified
 ) {
