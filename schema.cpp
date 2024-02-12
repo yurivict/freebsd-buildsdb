@@ -101,7 +101,12 @@ const char *dbSchema = R"(
 		b.ended AS build_ended_raw,
 		datetime(b.ended, 'unixepoch', 'localtime') AS build_ended_str,
 		b.status AS build_status,
-		b.last_modified AS build_last_modified
+		b.last_modified AS build_last_modified,
+		(SELECT count(*) FROM queued WHERE build_id = b.id) AS num_queued,
+		(SELECT count(*) FROM built WHERE build_id = b.id) AS num_built,
+		(SELECT count(*) FROM failed WHERE build_id = b.id) AS num_failed,
+		(SELECT count(*) FROM skipped WHERE build_id = b.id) AS num_skipped,
+		(SELECT count(*) FROM ignored WHERE build_id = b.id) AS num_ignored
 	FROM
 		server s,
 		masterbuild m,
