@@ -675,8 +675,8 @@ static unsigned writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db) {
 	auto enableInitially = [](const std::string &masterbuild) {
 		bool disabled =
 			contains(masterbuild, "124") // obsolete
-			//||
-			//contains(masterbuild, "releng") // ignore release engineering builds - they are not regular and are sometimes stopped for extended periods of time
+			||
+			contains(masterbuild, "releng") // ignore release engineering builds - they are not regular and are sometimes stopped for extended periods of time
 			||
 			contains(masterbuild, "powerpc") // too many failures on powerpc compared to other archs
 			;
