@@ -231,7 +231,7 @@ const char *dbSchema = R"(
 	WHERE
 		m.id = bf.masterbuild_id
 		AND
-		m.enabled = '1'
+		m.enabled = 1
 		AND
 		bf.id = f.build_id
 		AND
