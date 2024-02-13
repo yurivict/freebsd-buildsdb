@@ -285,8 +285,37 @@ static json fixupReplaceEmptyWithZero(const json &j) {
 	return j.empty() ? j : json("0");
 }
 
+static bool fileExists(const std::string &fileName) {
+	return std::ifstream(fileName).good();
+}
+
+static bool fileContainsString(const std::string &fileName, const std::string &str) {
+	std::ifstream file(fileName);
+	std::string line;
+	while (std::getline(file, line))
+		if (line.find(str, 0) != std::string::npos)
+			return true;
+	return false;
+}
+
 static std::string dbPath() {
 	return ::getenv("BUILDSDB_DATABASE") ? ::getenv("BUILDSDB_DATABASE") : "builds.sqlite";
+}
+
+static std::string dbPathPortsDB() {
+	return ::getenv("PORTSDB_DATABASE") ? ::getenv("PORTSDB_DATABASE") : "ports.sqlite";
+}
+
+static bool canOpenExistingPortsDB() {
+	try {
+		SQLite::Database(
+			dbPathPortsDB().c_str(),
+			SQLite::OPEN_READONLY
+		);
+		return true;
+	} catch(...) {
+		return false;
+	}
 }
 
 
@@ -1021,6 +1050,14 @@ static int doQuery(const std::string &query, const std::vector<std::string> &arg
 	std::string sargs;
 	for (auto &arg : args)
 		sargs += STR(" " << arg);
+
+	// check if PortsDB is needed and present
+	if (fileContainsString(sqlScriptPath, "ports.sqlite")) {
+		if (!canOpenExistingPortsDB())
+			FAIL("this query needs PortsDB, please install it with 'sudo pkg install portsdb', and fetch it with 'portsdb-import'")
+		if (!fileExists("ports.sqlite"))
+			fs::create_symlink(dbPathPortsDB(), "ports.sqlite");
+	}
 
 	// run SQL
 	auto res = ::system(CSTR(
