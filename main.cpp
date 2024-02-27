@@ -375,6 +375,40 @@ struct BuildInfo {
 	std::vector<Failed>    failed;
 	std::vector<Ignored>   ignored;
 	std::vector<Skipped>   skipped;
+
+	// methods
+
+	size_t numRecords() const {
+		size_t sz = 0;
+		sz += queued  .size();
+		sz += built   .size();
+		sz += failed  .size();
+		sz += ignored .size();
+		sz += skipped .size();
+		return sz;
+	}
+	float progressPercentage() const {
+		size_t numDone = 0;
+		numDone += built   .size();
+		numDone += failed  .size();
+		numDone += ignored .size();
+		numDone += skipped .size();
+
+		// checks
+		if (queued.empty()) {
+			WARNING("no queued records found in the build info set")
+			return 0;
+		}
+		if (queued.size() < numDone) {
+			WARNING("build data set has more done records (" << numDone << ") than queued records (" << queued.size() << ")")
+			return 0;
+		}
+
+		return float(numDone)/float(queued.size())*100.f;
+	}
+	size_t numQueued() const {
+		return queued.size();
+	}
 };
 
 struct Queries {
@@ -846,7 +880,13 @@ static unsigned writeBuildInfoToDB(const BuildInfos &buildInfos, Database &db) {
 			// by builds for this masterbuild
 			for (auto &bi : m.second)
 				if (!bi->waived) {
-					MSG("... saving the build #" << ++bno << " of " << numberBuildsToSave << ": " << m.first << "/" << bi->buildname)
+					MSG(
+						"... saving the build #" << ++bno << " of " << numberBuildsToSave << ": "
+						<< m.first << "/" << bi->buildname
+						<< " with " << bi->numRecords() << " records"
+						<< ", with progress " << bi->progressPercentage() << " %"
+						<< " of " << bi->numQueued() << " queued packages"
+					)
 
 					SQL_STMT(stmtSelectBuild, "SELECT id, ended FROM build WHERE masterbuild_id=? AND name=?")
 					SQL_STMT(stmtInsertBuild, "INSERT INTO build(masterbuild_id,name,started,ended,status,last_modified) VALUES(?,?,?,?,?,?)")
