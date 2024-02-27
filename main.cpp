@@ -175,7 +175,7 @@ static std::tuple<bool/*waived*/,std::string/*content*/> fetchDataFromURL(
 	std::string *needLastModified = nullptr
 ) {
 	// helpers
-	auto getOneHeader = [](CURL *curl, const char *header_name) -> std::string {
+	auto getOneHeader = [&url](CURL *curl, const char *header_name) -> std::string {
 		struct curl_header *prev = nullptr;
 		while (auto h = curl_easy_nextheader(curl, CURLH_HEADER, 0, prev)) {
 			if (equals(h->name, header_name)) {
@@ -183,7 +183,7 @@ static std::tuple<bool/*waived*/,std::string/*content*/> fetchDataFromURL(
 			}
 			prev = h;
 		}
-		WARNING("no Last-Modified field is present in the server response")
+		WARNING("no " << header_name << " field is present in the server response (for URL=" << url << ")")
 		return "";
 	};
 
