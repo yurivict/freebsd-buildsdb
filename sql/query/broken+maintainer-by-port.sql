@@ -7,7 +7,7 @@ ATTACH 'ports.sqlite' AS ports;
 
 SELECT
 	origin AS Port,
-	(SELECT MAINTAINER FROM ports.Port WHERE PKGORIGIN = origin) AS Maintaiuner,
+	(SELECT MAINTAINER FROM ports.Port WHERE PKGORIGIN = origin) AS Maintainer,
 	GROUP_CONCAT(DISTINCT masterbuild_name) AS Masterbuild,
 	GROUP_CONCAT(DISTINCT phase) AS Phase,
 	GROUP_CONCAT(DISTINCT errortype) AS ErrorType,

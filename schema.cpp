@@ -43,6 +43,7 @@ const char *dbSchema = R"(
 		PRIMARY KEY     (build_id, origin, pkgname),
 		FOREIGN KEY (build_id) REFERENCES build(id)
 	);
+	CREATE INDEX IF NOT EXISTS index_queued_origin ON queued(origin);
 	CREATE TABLE IF NOT EXISTS built (
 		build_id        INTEGER NOT NULL,
 		origin          TEXT NOT NULL,
@@ -71,6 +72,7 @@ const char *dbSchema = R"(
 		PRIMARY KEY     (build_id, origin, pkgname, reason),
 		FOREIGN KEY (build_id) REFERENCES build(id)
 	);
+	CREATE INDEX IF NOT EXISTS index_ignored_origin ON ignored(origin);
 	CREATE TABLE IF NOT EXISTS skipped (
 		build_id        INTEGER NOT NULL,
 		origin          TEXT NOT NULL,
@@ -79,6 +81,7 @@ const char *dbSchema = R"(
 		PRIMARY KEY     (build_id, origin, pkgname, depends),
 		FOREIGN KEY (build_id) REFERENCES build(id)
 	);
+	CREATE INDEX IF NOT EXISTS index_skipped_origin ON skipped(origin);
 	CREATE TABLE IF NOT EXISTS schema_version (
 		version         INTEGER NOT NULL
 	);

@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <ostream>
 #include <set>
 #include <stdexcept>
 #include <sstream>
@@ -110,6 +111,10 @@ static bool contains(const std::string &str, char chr) {
 
 static bool contains(const std::string &str, const char *small) {
 	return str.find(small) != std::string::npos;
+}
+
+static bool endsWith(const std::string &str, const char *small) {
+	return str.rfind(small) == int(str.size()) - std::strlen(small);
 }
 
 static bool equals(const char *str, const char *other) {
@@ -370,6 +375,79 @@ struct BuildInfo {
 	std::vector<Failed>    failed;
 	std::vector<Ignored>   ignored;
 	std::vector<Skipped>   skipped;
+};
+
+struct Queries {
+	struct Query {
+		std::filesystem::path    path;
+		std::string              name;
+		std::vector<std::string> args;
+
+		Query(const std::filesystem::path &path_)
+		: path(path_)
+		, name(path.filename())
+		{
+			auto nameWithArgs = path.filename().string().substr(0, path.filename().string().size() - std::strlen(".sql"));
+
+			// helper
+			auto lastArg = [](const std::string &fullName) -> size_t {
+				auto res = fullName.rfind("-{");
+				return res != std::string::npos ? res : 0;
+			};
+
+			// split arguments
+			while (auto argOffset = lastArg(nameWithArgs)) {
+				args.insert(args.begin(), nameWithArgs.substr(argOffset + 2, nameWithArgs.size() - 1 - (argOffset + 2)));
+				nameWithArgs.resize(argOffset);
+			}
+			name = nameWithArgs;
+		}
+
+		friend std::ostream& operator<<(std::ostream &os, const Query &query) {
+			os << query.name;
+			for (auto &arg : query.args)
+				os << " {" << arg << "}";
+			return os;
+		}
+	};
+	typedef std::shared_ptr<Query> QueryPtr;
+
+	std::map<std::string, QueryPtr> queriesByName;
+
+	Queries(const char *pattern) {
+		for (const auto &entry : fs::directory_iterator(queryPath())) {
+			auto path = entry.path();
+			auto pathStr = path.string();
+
+			// check
+			if (!endsWith(path.filename(), ".sql")) {
+				WARNING("found a stray file '" << pathStr << "' in the queries directory")
+				continue;
+			}
+
+			// filter out the pattern
+			if (pattern && !contains(pathStr, pattern))
+				continue;
+
+			// parse the script name
+			auto query = std::make_shared<Query>(path);
+			queriesByName[query->name] = query;
+		}
+	}
+
+	QueryPtr find(const std::string &name) const {
+		auto i = queriesByName.find(name);
+		return i != queriesByName.end() ? i->second : QueryPtr{ };
+	}
+
+	static std::string queryPath() {
+		for (auto d : {"sql", PREFIX "/share/buildsdb/sql"}) {
+			fs::directory_entry entry(fs::path(d) / "query");
+			if (entry.exists())
+				return entry.path();
+		}
+		FAIL("can't find query scripts")
+	}
 };
 
 typedef std::shared_ptr<BuildInfo> BuildInfoPtr;
@@ -886,6 +964,10 @@ static bool checkDbIsPresentWithMessage(const std::string &op) {
 	return true;
 }
 
+static bool stmtReturnsAnyRows(Database &db, const std::string &stmt) {
+	return SQLite::Statement(db, stmt).executeStep();
+}
+
 static void printSelectResult(const std::string &selectSql) {
 	auto res = ::system(CSTR(
 		"(echo .mode table; echo '" << selectSql << "') | sqlite3 " << dbPath()
@@ -1008,13 +1090,16 @@ static int doShowMasterbuilds(YesNoAny yna) {
 	return EXIT_SUCCESS;
 }
 
-static int doQuery(const std::string &query, const std::vector<std::string> &args) {
+static int doQuery(const std::string &name, const std::vector<std::string> &args) {
+	// DB object
+	Database db(true/*create*/);
+
 	// checks
 	if (!checkDbIsPresentWithMessage("query"))
 		return EXIT_FAILURE;
 
 	// process the 'help' query
-	if (query == "help") {
+	if (name == "help") {
 		// find path to the queryies directory
 		std::string queriesDir;
 		for (auto d : {"sql", PREFIX "/share/buildsdb/sql"}) {
@@ -1029,44 +1114,59 @@ static int doQuery(const std::string &query, const std::vector<std::string> &arg
 
 		// show all scripts
 		PRINT("available queries are:")
-		::system(CSTR("(cd " << queriesDir << " && ls | sed -e \"s|^|• |; s|\\.sql$||\") | sort"));
+		::system(CSTR("(cd " << queriesDir << " && ls | sed -e \"s|^|• |; s|\\.sql$||\") | sed -e 's|-{| {|g' | sort"));
 
 		return EXIT_SUCCESS;
 	}
 
-	// find path to the query SQL
-	std::string sqlScriptPath;
-	for (auto d : {"sql", PREFIX "/share/buildsdb/sql"}) {
-		auto dirPath = fs::path(d) / "query" / STR(query << ".sql");
-		if (fs::exists(dirPath)) {
-			sqlScriptPath = dirPath;
-			break;
+	// read the query set
+	Queries queries(name.c_str());
+
+	// execute query if it exists
+	if (auto query = queries.find(name)) {
+		// check if PortsDB is needed and present
+		if (fileContainsString(query->path.string(), "ports.sqlite")) {
+			if (!canOpenExistingPortsDB())
+				FAIL("this query needs PortsDB, please install it with 'sudo pkg install portsdb', and fetch it with 'portsdb-import'")
+			if (!fileExists("ports.sqlite"))
+				fs::create_symlink(dbPathPortsDB(), "ports.sqlite");
 		}
+
+		// check that the number of arguments matches
+		if (args.size() != query->args.size())
+			FAIL("supplied " << args.size() << " argument(s) for the query expecting " << query->args.size() << " argument(s): " << *query)
+
+		// validate arguments if needed
+		for (unsigned a = 0; a < args.size(); a++) {
+			auto aname = query->args[a];
+			auto aval = args[a];
+			if (aname == "port-origin") {
+				if (!stmtReturnsAnyRows(db, STR("SELECT origin FROM queued WHERE origin='" << aval << "' LIMIT 1")))
+					FAIL("'" << aval << "' isn't a valid port")
+			} else if (aname == "masterbuild-name") {
+				if (!stmtReturnsAnyRows(db, STR("SELECT id FROM masterbuild WHERE name='" << aval << "' LIMIT 1")))
+					FAIL("masterbuild '" << aval << "' doesn't exist")
+			} else if (aname == "build-name") {
+				if (!stmtReturnsAnyRows(db, STR("SELECT id FROM build WHERE name='" << aval << "' LIMIT 1")))
+					FAIL("build '" << aval << "' doesn't exist")
+			} // we don't fail for other argument names since they might be added later
+		}
+
+		// convert arguments
+		std::string sargs;
+		for (auto &arg : args)
+			sargs += STR(" " << arg);
+
+		// run SQL
+		auto res = ::system(CSTR(
+			"(echo .mode table; echo .header on; SQL=$(cat " << query->path << "); SQL=\"$(printf \"$SQL\"" << sargs << ")\"; echo \"$SQL\") | sqlite3 " << dbPath()
+		));
+		if (res != 0)
+			FAIL("SQL query failed to execute")
+	} else {
+		FAIL("query '" << name << "' doesn't exist, execute '" << argv0 << " query help' for the list of available queries")
 	}
-	if (sqlScriptPath.empty())
-		FAIL("query '" << query << "' doesn't exist, execute '" << argv0 << " query help' for the list of available queries")
 
-	// convert arguments
-	std::string sargs;
-	for (auto &arg : args)
-		sargs += STR(" " << arg);
-
-	// check if PortsDB is needed and present
-	if (fileContainsString(sqlScriptPath, "ports.sqlite")) {
-		if (!canOpenExistingPortsDB())
-			FAIL("this query needs PortsDB, please install it with 'sudo pkg install portsdb', and fetch it with 'portsdb-import'")
-		if (!fileExists("ports.sqlite"))
-			fs::create_symlink(dbPathPortsDB(), "ports.sqlite");
-	}
-
-	// run SQL
-	auto res = ::system(CSTR(
-		"(echo .mode table; SQL=$(cat " << sqlScriptPath << "); SQL=\"$(printf \"$SQL\"" << sargs << ")\"; echo \"$SQL\") | sqlite3 " << dbPath()
-	));
-	if (res != 0)
-		FAIL("SQL query failed to execute")
-
-	// try to resolve 
 	return EXIT_SUCCESS;
 }
 
