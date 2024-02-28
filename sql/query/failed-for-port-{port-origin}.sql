@@ -1,3 +1,4 @@
+-- returns all failed builds for a given port
 
 SELECT
 	m.name AS Masterbuild,

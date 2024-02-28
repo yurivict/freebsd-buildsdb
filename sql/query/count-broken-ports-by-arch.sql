@@ -1,7 +1,4 @@
-
---
--- count-broken-ports-by-arch.sql: returns counts of broken portts by architecture
---
+-- returns counts of broken ports by architecture
 
 SELECT
 	replace(

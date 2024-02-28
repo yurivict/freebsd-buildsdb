@@ -1,6 +1,7 @@
+-- returns the number of broken ports on Tier1 architectures
 
 SELECT
-	count(DISTINCT(origin)) AS Count
+	COUNT(DISTINCT(origin)) AS Count
 FROM
 	broken
 WHERE

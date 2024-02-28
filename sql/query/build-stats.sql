@@ -1,3 +1,4 @@
+-- returns the list of builds with statistics
 
 SELECT
 	m.name AS Masterbuild,

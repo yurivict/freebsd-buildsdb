@@ -1,3 +1,5 @@
+-- returns all failed packages in the build
+
 SELECT
 	l.origin AS Port,
 	l.pkgname AS Package,

@@ -1,7 +1,4 @@
-
---
--- broken-by-port.sql: returns a list of currently broken ports grouped by port
---
+-- returns the list of currently broken ports grouped by port, includes maintainer info
 
 ATTACH 'ports.sqlite' AS ports;
 

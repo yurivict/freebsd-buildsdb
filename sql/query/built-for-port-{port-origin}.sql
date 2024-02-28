@@ -1,3 +1,4 @@
+-- returns all built packages for the given port
 
 SELECT
 	m.name AS Masterbuild,

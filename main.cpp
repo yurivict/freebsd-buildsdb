@@ -1,6 +1,7 @@
 // Copyright (C) 2024 by Yuri Victorovich. All rights reserved.
 
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <iostream>
@@ -416,6 +417,7 @@ struct Queries {
 		std::filesystem::path    path;
 		std::string              name;
 		std::vector<std::string> args;
+		std::string              description;
 
 		Query(const std::filesystem::path &path_)
 		: path(path_)
@@ -435,6 +437,15 @@ struct Queries {
 				nameWithArgs.resize(argOffset);
 			}
 			name = nameWithArgs;
+
+			{ // parse description
+				std::ifstream file(path);
+				std::string line;
+				if (std::getline(file, line) && line.size() >= 4 && line[0] == '-' && line[1] == '-' && line[2] == ' ')
+					description = line.substr(3);
+				else
+					WARNING("the script '" << path << "' doesn't contain description")
+			}
 		}
 
 		friend std::ostream& operator<<(std::ostream &os, const Query &query) {
@@ -448,7 +459,7 @@ struct Queries {
 
 	std::map<std::string, QueryPtr> queriesByName;
 
-	Queries(const char *pattern) {
+	Queries(const char *pattern = nullptr) {
 		for (const auto &entry : fs::directory_iterator(queryPath())) {
 			auto path = entry.path();
 			auto pathStr = path.string();
@@ -481,6 +492,34 @@ struct Queries {
 				return entry.path();
 		}
 		FAIL("can't find query scripts")
+	}
+
+	friend std::ostream& operator<<(std::ostream &os, const Queries &queries) {
+		// helper
+		auto spaces = [](unsigned num) {
+			std::ostringstream ss;
+			while (num) {
+				ss << ' ';
+				num--;
+			}
+			return ss.str();
+		};
+
+		// convert useful info into a map
+		std::map<std::string, std::tuple<std::string, std::string>> querySignatiresDescriptions;
+		for (auto i : queries.queriesByName)
+			querySignatiresDescriptions[i.first] = {STR(*i.second), i.second->description};
+
+		// find max signature length
+		size_t maxSignatureLength = 0;
+		for (auto i : querySignatiresDescriptions)
+			maxSignatureLength = std::max(maxSignatureLength, std::get<0>(i.second).size());
+
+		// print
+		for (auto i : querySignatiresDescriptions)
+			os << "• " << std::get<0>(i.second) << spaces(maxSignatureLength - std::get<0>(i.second).size()) << " : " << std::get<1>(i.second) << std::endl;
+
+		return os;
 	}
 };
 
@@ -1140,21 +1179,12 @@ static int doQuery(const std::string &name, const std::vector<std::string> &args
 
 	// process the 'help' query
 	if (name == "help") {
-		// find path to the queryies directory
-		std::string queriesDir;
-		for (auto d : {"sql", PREFIX "/share/buildsdb/sql"}) {
-			auto dirPath = fs::path(d) / "query";
-			if (fs::exists(dirPath)) {
-				queriesDir = dirPath;
-				break;
-			}
-		}
-		if (queriesDir.empty())
-			FAIL("can't find queries directory")
+		// read the query set
+		Queries queries;
 
 		// show all scripts
 		PRINT("available queries are:")
-		::system(CSTR("(cd " << queriesDir << " && ls | sed -e \"s|^|• |; s|\\.sql$||\") | sed -e 's|-{| {|g' | sort"));
+		PRINT(queries)
 
 		return EXIT_SUCCESS;
 	}
@@ -1199,7 +1229,7 @@ static int doQuery(const std::string &name, const std::vector<std::string> &args
 
 		// run SQL
 		auto res = ::system(CSTR(
-			"(echo .mode table; echo .header on; SQL=$(cat " << query->path << "); SQL=\"$(printf \"$SQL\"" << sargs << ")\"; echo \"$SQL\") | sqlite3 " << dbPath()
+			"(echo .mode table; echo .header on; SQL=$(cat " << query->path << "); SQL=\"$(printf -- \"$SQL\"" << sargs << ")\"; echo \"$SQL\") | sqlite3 " << dbPath()
 		));
 		if (res != 0)
 			FAIL("SQL query failed to execute")
