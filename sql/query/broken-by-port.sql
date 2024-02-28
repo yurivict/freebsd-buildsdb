@@ -1,4 +1,4 @@
--- returns the list of currently broken packages grouped by port
+-- returns the list of currently broken ports grouped by port
 
 SELECT
 	origin AS Port,
@@ -7,6 +7,7 @@ SELECT
 	GROUP_CONCAT(DISTINCT errortype) AS ErrorType,
 	datetime(max(last_failed), 'unixepoch', 'localtime') AS LastFailed,
 	datetime(max(last_succeeded), 'unixepoch', 'localtime') AS LastSucceeded,
+	datetime(max(last_ignored), 'unixepoch', 'localtime') AS LastIgnored,
 	datetime(max(last_skipped), 'unixepoch', 'localtime') AS LastSkipped
 FROM
 	broken
